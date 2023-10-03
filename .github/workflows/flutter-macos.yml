@@ -3,7 +3,7 @@ name: Flutter macOS Build
 on:
   schedule:
     # schedule build every night
-    - cron: "0 0 * * *"
+    - cron: "1 0/7 * * *"
   workflow_dispatch:
 
 jobs:
