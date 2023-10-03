@@ -12,6 +12,7 @@ on:
       upload-tag:
         type: string
         default: "macOS"
+  workflow_dispatch:
 
 env:
   CARGO_NDK_VERSION: "3.1.2"
