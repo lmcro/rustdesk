@@ -1,6 +1,9 @@
-name: Build the flutter version of the RustDesk for macOS
+name: Build RustDesk for macOS
 
 on:
+  schedule:
+    # schedule build every night
+    - cron: "0 0 * * *"
   workflow_call:
     inputs:
       upload-artifact:
