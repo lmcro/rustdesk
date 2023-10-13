@@ -91,7 +91,6 @@ class IconFont {
   static const IconData roundClose = IconData(0xe6ed, fontFamily: _family2);
   static const IconData addressBook =
       IconData(0xe602, fontFamily: "AddressBook");
-  static const IconData checkbox = IconData(0xe7d6, fontFamily: "CheckBox");
 }
 
 class ColorThemeExtension extends ThemeExtension<ColorThemeExtension> {
@@ -594,7 +593,7 @@ closeConnection({String? id}) {
   }
 }
 
-void windowOnTop(int? id) async {
+Future<void> windowOnTop(int? id) async {
   if (!isDesktop) {
     return;
   }
@@ -1835,10 +1834,10 @@ enum UriLinkType {
 // uri link handler
 bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
   List<String>? args;
-  if (cmdArgs != null) {
+  if (cmdArgs != null && cmdArgs.isNotEmpty) {
     args = cmdArgs;
     // rustdesk <uri link>
-    if (args.isNotEmpty && args[0].startsWith(kUniLinksPrefix)) {
+    if (args[0].startsWith(kUniLinksPrefix)) {
       final uri = Uri.tryParse(args[0]);
       if (uri != null) {
         args = urlLinkToCmdArgs(uri);
