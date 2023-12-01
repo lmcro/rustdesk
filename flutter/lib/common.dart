@@ -1983,8 +1983,8 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     id = uri.authority;
   }
 
-  if (isMobile){
-    if (id != null){
+  if (isMobile) {
+    if (id != null) {
       connect(Get.context!, id);
       return null;
     }
@@ -2040,7 +2040,7 @@ connect(
         final idController = Get.find<IDTextEditingController>();
         idController.text = formatID(id);
       }
-      if (Get.isRegistered<TextEditingController>()){
+      if (Get.isRegistered<TextEditingController>()) {
         final fieldTextEditingController = Get.find<TextEditingController>();
         fieldTextEditingController.text = formatID(id);
       }
@@ -2703,7 +2703,10 @@ openMonitorInTheSameTab(int i, FFI ffi, PeerInfo pi) {
       ? List.generate(pi.displays.length, (index) => index)
       : [i];
   bind.sessionSwitchDisplay(
-      sessionId: ffi.sessionId, value: Int32List.fromList(displays));
+    isDesktop: isDesktop,
+    sessionId: ffi.sessionId,
+    value: Int32List.fromList(displays),
+  );
   ffi.ffiModel.switchToNewDisplay(i, ffi.sessionId, ffi.id);
 }
 
@@ -2764,6 +2767,8 @@ parseParamScreenRect(Map<String, dynamic> params) {
   }
   return screenRect;
 }
+
+get isInputSourceFlutter => stateGlobal.getInputSource() == "Input source 2";
 
 class _ReconnectCountDownButton extends StatefulWidget {
   _ReconnectCountDownButton({
