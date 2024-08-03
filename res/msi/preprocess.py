@@ -33,10 +33,12 @@ g_arpsystemcomponent = {
     },
     "ReadMe": {
         "msi": "ARPREADME",
-        "v": "https://github.com/fufesou/rustdesk",
+        "v": "https://github.com/rustdesk/rustdesk",
     },
 }
 
+def default_revision_version():
+    return int(datetime.datetime.now().timestamp() / 60)
 
 def make_parser():
     parser = argparse.ArgumentParser(description="Msi preprocess script.")
@@ -63,10 +65,19 @@ def make_parser():
         "-c", "--custom", action="store_true", help="Is custom client", default=False
     )
     parser.add_argument(
+        "--custom-client-props",
+        type=str,
+        default="{}",
+        help='Custom client properties, e.g. \'{"connection-type": "outgoing"}\'',
+    )
+    parser.add_argument(
         "--app-name", type=str, default="RustDesk", help="The app name."
     )
     parser.add_argument(
         "-v", "--version", type=str, default="", help="The app version."
+    )
+    parser.add_argument(
+        "--revision-version", type=int, default=default_revision_version(), help="The revision version."
     )
     parser.add_argument(
         "-m",
@@ -380,6 +391,33 @@ def gen_custom_ARPSYSTEMCOMPONENT(args, dist_dir):
     else:
         return gen_custom_ARPSYSTEMCOMPONENT_False(args)
 
+def gen_custom_client_properties(args):
+    try:
+        props = json.loads(args.custom_client_props)
+    except json.JSONDecodeError as e:
+        print(f"Failed to decode custom props: {e}")
+        return False
+
+    def func(lines, index_start):
+        indent = g_indent_unit * 3
+
+        lines_new = []
+
+        if 'connection-type' in props:
+            lines_new.append(
+                f"""{indent}<Property Id="CC_CONNECTION_TYPE" Value="{props['connection-type']}" />\n"""
+            )
+
+        for i, line in enumerate(lines_new):
+            lines.insert(index_start + i + 1, line)
+        return lines
+
+    return gen_content_between_tags(
+        "Package/Fragments/AddRemoveProperties.wxs",
+        "<!--$CustomClientPropsStart$-->",
+        "<!--$CustomClientPropsEnd$-->",
+        func,
+    )
 
 def gen_content_between_tags(filename, tag_start, tag_end, func):
     target_file = Path(sys.argv[0]).parent.joinpath(filename)
@@ -430,6 +468,11 @@ def init_global_vars(dist_dir, app_name, args):
     if not version_pattern.match(g_version):
         print(f"Error: version {g_version} not found in {dist_app}")
         return False
+    if g_version.count(".") == 2:
+        # https://github.com/dotnet/runtime/blob/5535e31a712343a63f5d7d796cd874e563e5ac14/src/libraries/System.Private.CoreLib/src/System/Version.cs
+        if args.revision_version < 0 or args.revision_version > 2147483647:
+            raise ValueError(f"Invalid revision version: {args.revision_version}")    
+        g_version = f"{g_version}.{args.revision_version}"
 
     g_build_date = read_process_output("--build-date")
     build_date_pattern = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
@@ -494,6 +537,9 @@ if __name__ == "__main__":
         sys.exit(-1)
 
     if not gen_custom_ARPSYSTEMCOMPONENT(args, dist_dir):
+        sys.exit(-1)
+
+    if not gen_custom_client_properties(args):
         sys.exit(-1)
 
     if not gen_auto_component(app_name, dist_dir):
