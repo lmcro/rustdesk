@@ -31,6 +31,11 @@ LExit:
     return WcaFinalize(er);
 }
 
+// CAUTION: We can't simply remove the install folder here, because silent repair/upgrade will fail.
+// `RemoveInstallFolder()` is a deferred custom action, it will be executed after the files are copied.
+// `msiexec /i package.msi /qn`
+//
+// So we need to delete the files separately in install folder.
 UINT __stdcall RemoveInstallFolder(
     __in MSIHANDLE hInstall)
 {
@@ -41,6 +46,7 @@ UINT __stdcall RemoveInstallFolder(
     LPWSTR installFolder = NULL;
     LPWSTR pwz = NULL;
     LPWSTR pwzData = NULL;
+    WCHAR runtimeBroker[1024] = { 0, };
 
     hr = WcaInitialize(hInstall, "RemoveInstallFolder");
     ExitOnFailure(hr, "Failed to initialize");
@@ -52,21 +58,22 @@ UINT __stdcall RemoveInstallFolder(
     hr = WcaReadStringFromCaData(&pwz, &installFolder);
     ExitOnFailure(hr, "failed to read database key from custom action data: %ls", pwz);
 
+    StringCchPrintfW(runtimeBroker, sizeof(runtimeBroker) / sizeof(runtimeBroker[0]), L"%ls\\RuntimeBroker_rustdesk.exe", installFolder);
+
     SHFILEOPSTRUCTW fileOp;
     ZeroMemory(&fileOp, sizeof(SHFILEOPSTRUCT));
-
     fileOp.wFunc = FO_DELETE;
-    fileOp.pFrom = installFolder;
+    fileOp.pFrom = runtimeBroker;
     fileOp.fFlags = FOF_NOCONFIRMATION | FOF_SILENT;
 
     nResult = SHFileOperationW(&fileOp);
     if (nResult == 0)
     {
-        WcaLog(LOGMSG_STANDARD, "The directory \"%ls\" has been deleted.", installFolder);
+        WcaLog(LOGMSG_STANDARD, "The external file \"%ls\" has been deleted.", runtimeBroker);
     }
     else
     {
-        WcaLog(LOGMSG_STANDARD, "The directory \"%ls\" has not been deleted, error code: 0x%02X. Please refer to https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shfileoperationa for the error codes.", installFolder, nResult);
+        WcaLog(LOGMSG_STANDARD, "The external file \"%ls\" has not been deleted, error code: 0x%02X. Please refer to https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shfileoperationa for the error codes.", runtimeBroker, nResult);
     }
 
 LExit:
@@ -870,4 +877,56 @@ void TryStopDeleteServiceByShell(LPWSTR svcName)
     else {
         WcaLog(LOGMSG_STANDARD, "Failed to delete service: \"%ls\" with shell, current status: %d.", svcName, svcStatus.dwCurrentState);
     }
+}
+
+UINT __stdcall InstallPrinter(
+    __in MSIHANDLE hInstall)
+{
+    HRESULT hr = S_OK;
+    DWORD er = ERROR_SUCCESS;
+
+    int nResult = 0;
+    LPWSTR installFolder = NULL;
+    LPWSTR pwz = NULL;
+    LPWSTR pwzData = NULL;
+
+    hr = WcaInitialize(hInstall, "InstallPrinter");
+    ExitOnFailure(hr, "Failed to initialize");
+
+    hr = WcaGetProperty(L"CustomActionData", &pwzData);
+    ExitOnFailure(hr, "failed to get CustomActionData");
+
+    pwz = pwzData;
+    hr = WcaReadStringFromCaData(&pwz, &installFolder);
+    ExitOnFailure(hr, "failed to read database key from custom action data: %ls", pwz);
+
+    WcaLog(LOGMSG_STANDARD, "Try to install RD printer in : %ls", installFolder);
+    RemotePrinter::installUpdatePrinter(installFolder);
+    WcaLog(LOGMSG_STANDARD, "Install RD printer done");
+
+LExit:
+    if (pwzData) {
+        ReleaseStr(pwzData);
+    }
+
+    er = SUCCEEDED(hr) ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE;
+    return WcaFinalize(er);
+}
+
+UINT __stdcall UninstallPrinter(
+    __in MSIHANDLE hInstall)
+{
+    HRESULT hr = S_OK;
+    DWORD er = ERROR_SUCCESS;
+
+    hr = WcaInitialize(hInstall, "UninstallPrinter");
+    ExitOnFailure(hr, "Failed to initialize");
+
+    WcaLog(LOGMSG_STANDARD, "Try to uninstall RD printer");
+    RemotePrinter::uninstallPrinter();
+    WcaLog(LOGMSG_STANDARD, "Uninstall RD printer done");
+
+LExit:
+    er = SUCCEEDED(hr) ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE;
+    return WcaFinalize(er);
 }

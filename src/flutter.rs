@@ -17,8 +17,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::CString,
+    io::{Error as IoError, ErrorKind as IoErrorKind},
     os::raw::{c_char, c_int, c_void},
     str::FromStr,
     sync::{
@@ -50,7 +51,7 @@ lazy_static::lazy_static! {
 
 #[cfg(target_os = "windows")]
 lazy_static::lazy_static! {
-    pub static ref TEXTURE_RGBA_RENDERER_PLUGIN: Result<Library, LibError> = Library::open("texture_rgba_renderer_plugin.dll");
+    pub static ref TEXTURE_RGBA_RENDERER_PLUGIN: Result<Library, LibError> = load_plugin_in_app_path("texture_rgba_renderer_plugin.dll");
 }
 
 #[cfg(target_os = "linux")]
@@ -65,7 +66,37 @@ lazy_static::lazy_static! {
 
 #[cfg(target_os = "windows")]
 lazy_static::lazy_static! {
-    pub static ref TEXTURE_GPU_RENDERER_PLUGIN: Result<Library, LibError> = Library::open("flutter_gpu_texture_renderer_plugin.dll");
+    pub static ref TEXTURE_GPU_RENDERER_PLUGIN: Result<Library, LibError> = load_plugin_in_app_path("flutter_gpu_texture_renderer_plugin.dll");
+}
+
+// Move this function into `src/platform/windows.rs` if there're more calls to load plugins.
+// Load dll with full path.
+#[cfg(target_os = "windows")]
+fn load_plugin_in_app_path(dll_name: &str) -> Result<Library, LibError> {
+    match std::env::current_exe() {
+        Ok(exe_file) => {
+            if let Some(cur_dir) = exe_file.parent() {
+                let full_path = cur_dir.join(dll_name);
+                if !full_path.exists() {
+                    Err(LibError::OpeningLibraryError(IoError::new(
+                        IoErrorKind::NotFound,
+                        format!("{} not found", dll_name),
+                    )))
+                } else {
+                    Library::open(full_path)
+                }
+            } else {
+                Err(LibError::OpeningLibraryError(IoError::new(
+                    IoErrorKind::Other,
+                    format!(
+                        "Invalid exe parent for {}",
+                        exe_file.to_string_lossy().as_ref()
+                    ),
+                )))
+            }
+        }
+        Err(e) => Err(LibError::OpeningLibraryError(e)),
+    }
 }
 
 /// FFI for rustdesk core's main entry.
@@ -513,17 +544,45 @@ impl FlutterHandler {
     where
         V: Sized + Serialize + Clone,
     {
+        self.push_event_(name, event, &[], excludes);
+    }
+
+    pub fn push_event_to<V>(&self, name: &str, event: &[(&str, V)], include: &[&SessionID])
+    where
+        V: Sized + Serialize + Clone,
+    {
+        self.push_event_(name, event, include, &[]);
+    }
+
+    pub fn push_event_<V>(
+        &self,
+        name: &str,
+        event: &[(&str, V)],
+        includes: &[&SessionID],
+        excludes: &[&SessionID],
+    ) where
+        V: Sized + Serialize + Clone,
+    {
         let mut h: HashMap<&str, serde_json::Value> =
             event.iter().map(|(k, v)| (*k, json!(*v))).collect();
         debug_assert!(h.get("name").is_none());
         h.insert("name", json!(name));
         let out = serde_json::ser::to_string(&h).unwrap_or("".to_owned());
         for (sid, session) in self.session_handlers.read().unwrap().iter() {
-            if excludes.contains(&sid) {
-                continue;
+            let mut push = false;
+            if includes.is_empty() {
+                if !excludes.contains(&sid) {
+                    push = true;
+                }
+            } else {
+                if includes.contains(&sid) {
+                    push = true;
+                }
             }
-            if let Some(stream) = &session.event_stream {
-                stream.add(EventToUI::Event(out.clone()));
+            if push {
+                if let Some(stream) = &session.event_stream {
+                    stream.add(EventToUI::Event(out.clone()));
+                }
             }
         }
     }
@@ -726,6 +785,20 @@ impl InvokeUiSession for FlutterHandler {
         }
     }
 
+    fn update_empty_dirs(&self, res: ReadEmptyDirsResponse) {
+        self.push_event(
+            "empty_dirs",
+            &[
+                ("is_local", "false"),
+                (
+                    "value",
+                    &crate::common::make_empty_dirs_response_to_json(&res),
+                ),
+            ],
+            &[],
+        );
+    }
+
     // unused in flutter
     fn update_transfer_list(&self) {}
 
@@ -802,13 +875,13 @@ impl InvokeUiSession for FlutterHandler {
 
     fn set_peer_info(&self, pi: &PeerInfo) {
         let displays = Self::make_displays_msg(&pi.displays);
-        let mut features: HashMap<&str, i32> = Default::default();
+        let mut features: HashMap<&str, bool> = Default::default();
         for ref f in pi.features.iter() {
-            features.insert("privacy_mode", if f.privacy_mode { 1 } else { 0 });
+            features.insert("privacy_mode", f.privacy_mode);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
-            features.insert("privacy_mode", 0);
+            features.insert("privacy_mode", false);
         }
         let features = serde_json::ser::to_string(&features).unwrap_or("".to_owned());
         let resolutions = serialize_resolutions(&pi.resolutions.resolutions);
@@ -1010,6 +1083,82 @@ impl InvokeUiSession for FlutterHandler {
             rgba_data.valid = false;
         }
     }
+
+    fn update_record_status(&self, start: bool) {
+        self.push_event("record_status", &[("start", &start.to_string())], &[]);
+    }
+
+    fn printer_request(&self, id: i32, path: String) {
+        self.push_event(
+            "printer_request",
+            &[("id", json!(id)), ("path", json!(path))],
+            &[],
+        );
+    }
+
+    fn handle_screenshot_resp(&self, sid: String, msg: String) {
+        match SessionID::from_str(&sid) {
+            Ok(sid) => self.push_event_to("screenshot", &[("msg", json!(msg))], &[&sid]),
+            Err(e) => {
+                // Unreachable!
+                log::error!("Failed to parse sid \"{}\", {}", sid, e);
+            }
+        }
+    }
+
+    fn handle_terminal_response(&self, response: TerminalResponse) {
+        use hbb_common::message_proto::terminal_response::Union;
+
+        match response.union {
+            Some(Union::Opened(opened)) => {
+                let mut event_data: Vec<(&str, serde_json::Value)> = vec![
+                    ("type", json!("opened")),
+                    ("terminal_id", json!(opened.terminal_id)),
+                    ("success", json!(opened.success)),
+                    ("message", json!(&opened.message)),
+                    ("pid", json!(opened.pid)),
+                    ("service_id", json!(&opened.service_id)),
+                ];
+                self.push_event_("terminal_response", &event_data, &[], &[]);
+            }
+            Some(Union::Data(data)) => {
+                // Decompress data if needed
+                let output_data = if data.compressed {
+                    hbb_common::compress::decompress(&data.data)
+                } else {
+                    data.data.to_vec()
+                };
+
+                let encoded = crate::encode64(&output_data);
+                let event_data: Vec<(&str, serde_json::Value)> = vec![
+                    ("type", json!("data")),
+                    ("terminal_id", json!(data.terminal_id)),
+                    ("data", json!(&encoded)),
+                ];
+                self.push_event_("terminal_response", &event_data, &[], &[]);
+            }
+            Some(Union::Closed(closed)) => {
+                let event_data: Vec<(&str, serde_json::Value)> = vec![
+                    ("type", json!("closed")),
+                    ("terminal_id", json!(closed.terminal_id)),
+                    ("exit_code", json!(closed.exit_code)),
+                ];
+                self.push_event_("terminal_response", &event_data, &[], &[]);
+            }
+            Some(Union::Error(error)) => {
+                let event_data: Vec<(&str, serde_json::Value)> = vec![
+                    ("type", json!("error")),
+                    ("terminal_id", json!(error.terminal_id)),
+                    ("message", json!(&error.message)),
+                ];
+                self.push_event_("terminal_response", &event_data, &[], &[]);
+            }
+            None => {}
+            Some(_) => {
+                log::warn!("Unhandled terminal response type");
+            }
+        }
+    }
 }
 
 impl FlutterHandler {
@@ -1100,8 +1249,14 @@ pub fn session_add_existed(
     peer_id: String,
     session_id: SessionID,
     displays: Vec<i32>,
+    is_view_camera: bool,
 ) -> ResultType<()> {
-    sessions::insert_peer_session_id(peer_id, ConnType::DEFAULT_CONN, session_id, displays);
+    let conn_type = if is_view_camera {
+        ConnType::VIEW_CAMERA
+    } else {
+        ConnType::DEFAULT_CONN
+    };
+    sessions::insert_peer_session_id(peer_id, conn_type, session_id, displays);
     Ok(())
 }
 
@@ -1111,20 +1266,28 @@ pub fn session_add_existed(
 ///
 /// * `id` - The identifier of the remote session with prefix. Regex: [\w]*[\_]*[\d]+
 /// * `is_file_transfer` - If the session is used for file transfer.
+/// * `is_view_camera` - If the session is used for view camera.
 /// * `is_port_forward` - If the session is used for port forward.
 pub fn session_add(
     session_id: &SessionID,
     id: &str,
     is_file_transfer: bool,
+    is_view_camera: bool,
     is_port_forward: bool,
     is_rdp: bool,
+    is_terminal: bool,
     switch_uuid: &str,
     force_relay: bool,
     password: String,
     is_shared_password: bool,
+    conn_token: Option<String>,
 ) -> ResultType<FlutterSession> {
     let conn_type = if is_file_transfer {
         ConnType::FILE_TRANSFER
+    } else if is_view_camera {
+        ConnType::VIEW_CAMERA
+    } else if is_terminal {
+        ConnType::TERMINAL
     } else if is_port_forward {
         if is_rdp {
             ConnType::RDP
@@ -1176,6 +1339,7 @@ pub fn session_add(
         force_relay,
         get_adapter_luid(),
         shared_password,
+        conn_token,
     );
 
     let session = Arc::new(session.clone());
@@ -1244,17 +1408,36 @@ fn try_send_close_event(event_stream: &Option<StreamSink<EventToUI>>) {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "ios"))]
 pub fn update_text_clipboard_required() {
     let is_required = sessions::get_sessions()
         .iter()
         .any(|s| s.is_text_clipboard_required());
+    #[cfg(target_os = "android")]
+    let _ = scrap::android::ffi::call_clipboard_manager_enable_client_clipboard(is_required);
     Client::set_is_text_clipboard_required(is_required);
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn send_text_clipboard_msg(msg: Message) {
+#[cfg(feature = "unix-file-copy-paste")]
+pub fn update_file_clipboard_required() {
+    let is_required = sessions::get_sessions()
+        .iter()
+        .any(|s| s.is_file_clipboard_required());
+    Client::set_is_file_clipboard_required(is_required);
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn send_clipboard_msg(msg: Message, _is_file: bool) {
     for s in sessions::get_sessions() {
+        #[cfg(feature = "unix-file-copy-paste")]
+        if _is_file {
+            if crate::is_support_file_copy_paste_num(s.lc.read().unwrap().version)
+                && s.is_file_clipboard_required()
+            {
+                s.send(Data::Message(msg.clone()));
+            }
+            continue;
+        }
         if s.is_text_clipboard_required() {
             // Check if the client supports multi clipboards
             if let Some(message::Union::MultiClipboards(multi_clipboards)) = &msg.union {
@@ -1780,9 +1963,56 @@ pub fn try_sync_peer_option(
     }
 }
 
+pub(super) fn session_update_virtual_display(session: &FlutterSession, index: i32, on: bool) {
+    let virtual_display_key = "virtual-display";
+    let displays = session.get_option(virtual_display_key.to_owned());
+    if !on {
+        if index == -1 {
+            if !displays.is_empty() {
+                session.set_option(virtual_display_key.to_owned(), "".to_owned());
+            }
+        } else {
+            let mut vdisplays = displays.split(',').collect::<Vec<_>>();
+            let len = vdisplays.len();
+            if index == 0 {
+                // 0 means we cann't toggle the virtual display by index.
+                vdisplays.remove(vdisplays.len() - 1);
+            } else {
+                if let Some(i) = vdisplays.iter().position(|&x| x == index.to_string()) {
+                    vdisplays.remove(i);
+                }
+            }
+            if vdisplays.len() != len {
+                session.set_option(
+                    virtual_display_key.to_owned(),
+                    vdisplays.join(",").to_owned(),
+                );
+            }
+        }
+    } else {
+        let mut vdisplays = displays
+            .split(',')
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>();
+        let len = vdisplays.len();
+        if index == 0 {
+            vdisplays.push(index.to_string());
+        } else {
+            if !vdisplays.iter().any(|x| *x == index.to_string()) {
+                vdisplays.push(index.to_string());
+            }
+        }
+        if vdisplays.len() != len {
+            session.set_option(
+                virtual_display_key.to_owned(),
+                vdisplays.join(",").to_owned(),
+            );
+        }
+    }
+}
+
 // sessions mod is used to avoid the big lock of sessions' map.
 pub mod sessions {
-    use std::collections::HashSet;
 
     use super::*;
 
@@ -1861,7 +2091,10 @@ pub mod sessions {
                 None => {}
             }
         }
-        SESSIONS.write().unwrap().remove(&remove_peer_key?)
+        let s = SESSIONS.write().unwrap().remove(&remove_peer_key?);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        update_session_count_to_server();
+        s
     }
 
     fn check_remove_unused_displays(
@@ -1909,6 +2142,8 @@ pub mod sessions {
                     // This operation will also cause the peer to send a switch display message.
                     // The switch display message will contain `SupportedResolutions`, which is useful when changing resolutions.
                     s.switch_display(value[0]);
+                    // Reset the valid flag of the display.
+                    s.next_rgba(value[0] as usize);
 
                     if !is_desktop {
                         s.capture_displays(vec![], vec![], value);
@@ -1961,6 +2196,14 @@ pub mod sessions {
             .write()
             .unwrap()
             .insert(session_id, Default::default());
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        update_session_count_to_server();
+    }
+
+    #[inline]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn update_session_count_to_server() {
+        crate::ipc::update_controlling_session_count(SESSIONS.read().unwrap().len()).ok();
     }
 
     #[inline]
@@ -1986,6 +2229,11 @@ pub mod sessions {
                 .write()
                 .unwrap()
                 .insert(session_id, h);
+            // If the session is a single display session, it may be a software rgba rendered display.
+            // If this is the second time the display is opened, the old valid flag may be true.
+            if displays.len() == 1 {
+                s.ui_handler.next_rgba(displays[0] as usize);
+            }
             true
         } else {
             false
@@ -1998,7 +2246,7 @@ pub mod sessions {
     }
 
     #[inline]
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "ios"))]
     pub fn has_sessions_running(conn_type: ConnType) -> bool {
         SESSIONS.read().unwrap().iter().any(|((_, r#type), s)| {
             *r#type == conn_type && s.session_handlers.read().unwrap().len() != 0
@@ -2007,20 +2255,16 @@ pub mod sessions {
 }
 
 pub(super) mod async_tasks {
-    use hbb_common::{
-        bail,
-        tokio::{
-            self, select,
-            sync::mpsc::{unbounded_channel, UnboundedSender},
-        },
-        ResultType,
-    };
+    use hbb_common::{bail, tokio, ResultType};
     use std::{
         collections::HashMap,
-        sync::{Arc, Mutex},
+        sync::{
+            mpsc::{sync_channel, SyncSender},
+            Arc, Mutex,
+        },
     };
 
-    type TxQueryOnlines = UnboundedSender<Vec<String>>;
+    type TxQueryOnlines = SyncSender<Vec<String>>;
     lazy_static::lazy_static! {
         static ref TX_QUERY_ONLINES: Arc<Mutex<Option<TxQueryOnlines>>> = Default::default();
     }
@@ -2037,21 +2281,18 @@ pub(super) mod async_tasks {
 
     #[tokio::main(flavor = "current_thread")]
     async fn start_flutter_async_runner_() {
-        let (tx_onlines, mut rx_onlines) = unbounded_channel::<Vec<String>>();
+        // Only one task is allowed to run at the same time.
+        let (tx_onlines, rx_onlines) = sync_channel::<Vec<String>>(1);
         TX_QUERY_ONLINES.lock().unwrap().replace(tx_onlines);
 
         loop {
-            select! {
-                ids = rx_onlines.recv() => {
-                    match ids {
-                        Some(_ids) => {
-                            #[cfg(not(any(target_os = "ios")))]
-                            crate::rendezvous_mediator::query_online_states(_ids, handle_query_onlines).await
-                        }
-                        None => {
-                            break;
-                        }
-                    }
+            match rx_onlines.recv() {
+                Ok(ids) => {
+                    crate::client::peer_online::query_online_states(ids, handle_query_onlines).await
+                }
+                _ => {
+                    // unreachable!
+                    break;
                 }
             }
         }
@@ -2059,7 +2300,8 @@ pub(super) mod async_tasks {
 
     pub fn query_onlines(ids: Vec<String>) -> ResultType<()> {
         if let Some(tx) = TX_QUERY_ONLINES.lock().unwrap().as_ref() {
-            let _ = tx.send(ids)?;
+            // Ignore if the channel is full.
+            let _ = tx.try_send(ids)?;
         } else {
             bail!("No tx_query_onlines");
         }

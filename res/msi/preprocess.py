@@ -8,7 +8,9 @@ import argparse
 import datetime
 import subprocess
 import re
+import platform
 from pathlib import Path
+from itertools import chain
 import shutil
 
 g_indent_unit = "\t"
@@ -47,7 +49,7 @@ def make_parser():
         "--dist-dir",
         type=str,
         default="../../rustdesk",
-        help="The dist direcotry to install.",
+        help="The dist directory to install.",
     )
     parser.add_argument(
         "--arp",
@@ -65,10 +67,10 @@ def make_parser():
         "-c", "--custom", action="store_true", help="Is custom client", default=False
     )
     parser.add_argument(
-        "--custom-client-props",
+        "--conn-type",
         type=str,
-        default="{}",
-        help='Custom client properties, e.g. \'{"connection-type": "outgoing"}\'',
+        default="",
+        help='Connection type, e.g. "incoming", "outgoing". Default is empty, means incoming-outgoing',
     )
     parser.add_argument(
         "--app-name", type=str, default="RustDesk", help="The app name."
@@ -90,7 +92,7 @@ def make_parser():
 
 
 def read_lines_and_start_index(file_path, tag_start, tag_end):
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
     index_start = -1
     index_end = -1
@@ -180,13 +182,24 @@ def gen_pre_vars(args, dist_dir):
 def replace_app_name_in_langs(app_name):
     langs_dir = Path(sys.argv[0]).parent.joinpath("Package/Language")
     for file_path in langs_dir.glob("*.wxl"):
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
         for i, line in enumerate(lines):
             lines[i] = line.replace("RustDesk", app_name)
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
+def replace_app_name_in_custom_actions(app_name):
+    custion_actions_dir = Path(sys.argv[0]).parent.joinpath("CustomActions")
+    for file_path in chain(custion_actions_dir.glob("*.cpp"), custion_actions_dir.glob("*.h")):
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for i, line in enumerate(lines):
+            line = re.sub(r"\bRustDesk\b", app_name, line)
+            line = line.replace(f"{app_name} v4 Printer Driver", "RustDesk v4 Printer Driver")
+            lines[i] = line
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
 
 def gen_upgrade_info():
     def func(lines, index_start):
@@ -301,7 +314,7 @@ def gen_custom_ARPSYSTEMCOMPONENT_True(args, dist_dir):
             f'{indent}<RegistryValue Type="string" Name="DisplayName" Value="{args.app_name}" />\n'
         )
         lines_new.append(
-            f'{indent}<RegistryValue Type="string" Name="DisplayIcon" Value="[INSTALLFOLDER]{args.app_name}.exe" />\n'
+            f'{indent}<RegistryValue Type="string" Name="DisplayIcon" Value="[INSTALLFOLDER_INNER]{args.app_name}.exe" />\n'
         )
         lines_new.append(
             f'{indent}<RegistryValue Type="string" Name="DisplayVersion" Value="{g_version}" />\n'
@@ -314,7 +327,7 @@ def gen_custom_ARPSYSTEMCOMPONENT_True(args, dist_dir):
             f'{indent}<RegistryValue Type="string" Name="InstallDate" Value="{installDate}" />\n'
         )
         lines_new.append(
-            f'{indent}<RegistryValue Type="string" Name="InstallLocation" Value="[INSTALLFOLDER]" />\n'
+            f'{indent}<RegistryValue Type="string" Name="InstallLocation" Value="[INSTALLFOLDER_INNER]" />\n'
         )
         lines_new.append(
             f'{indent}<RegistryValue Type="string" Name="InstallSource" Value="[InstallSource]" />\n'
@@ -391,21 +404,14 @@ def gen_custom_ARPSYSTEMCOMPONENT(args, dist_dir):
     else:
         return gen_custom_ARPSYSTEMCOMPONENT_False(args)
 
-def gen_custom_client_properties(args):
-    try:
-        props = json.loads(args.custom_client_props)
-    except json.JSONDecodeError as e:
-        print(f"Failed to decode custom props: {e}")
-        return False
-
+def gen_conn_type(args):
     def func(lines, index_start):
         indent = g_indent_unit * 3
 
         lines_new = []
-
-        if 'connection-type' in props:
+        if args.conn_type != "":
             lines_new.append(
-                f"""{indent}<Property Id="CC_CONNECTION_TYPE" Value="{props['connection-type']}" />\n"""
+                f"""{indent}<Property Id="CC_CONNECTION_TYPE" Value="{args.conn_type}" />\n"""
             )
 
         for i, line in enumerate(lines_new):
@@ -427,7 +433,7 @@ def gen_content_between_tags(filename, tag_start, tag_end, func):
 
     func(lines, index_start)
 
-    with open(target_file, "w") as f:
+    with open(target_file, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
     return True
@@ -487,19 +493,19 @@ def update_license_file(app_name):
     if app_name == "RustDesk":
         return
     license_file = Path(sys.argv[0]).parent.joinpath("Package/License.rtf")
-    with open(license_file, "r") as f:
+    with open(license_file, "r", encoding="utf-8") as f:
         license_content = f.read()
     license_content = license_content.replace("website rustdesk.com and other ", "")
     license_content = license_content.replace("RustDesk", app_name)
     license_content = re.sub("Purslane Ltd", app_name, license_content, flags=re.IGNORECASE)
-    with open(license_file, "w") as f:
+    with open(license_file, "w", encoding="utf-8") as f:
         f.write(license_content)
 
 
 def replace_component_guids_in_wxs():
     langs_dir = Path(sys.argv[0]).parent.joinpath("Package")
     for file_path in langs_dir.glob("**/*.wxs"):
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
         # <Component Id="Product.Registry.DefaultIcon" Guid="6DBF2690-0955-4C6A-940F-634DDA503F49">
@@ -508,7 +514,7 @@ def replace_component_guids_in_wxs():
             if match:
                 lines[i] = re.sub(r'Guid="[^"]+"', f'Guid="{uuid.uuid4()}"', line)
 
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
 
@@ -539,7 +545,7 @@ if __name__ == "__main__":
     if not gen_custom_ARPSYSTEMCOMPONENT(args, dist_dir):
         sys.exit(-1)
 
-    if not gen_custom_client_properties(args):
+    if not gen_conn_type(args):
         sys.exit(-1)
 
     if not gen_auto_component(app_name, dist_dir):
@@ -549,3 +555,4 @@ if __name__ == "__main__":
         sys.exit(-1)
 
     replace_app_name_in_langs(args.app_name)
+    replace_app_name_in_custom_actions(args.app_name)
